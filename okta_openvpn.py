@@ -100,7 +100,8 @@ class OktaAPIAuth(object):
                  username, password, client_ipaddr,
                  mfa_push_delay_secs=None,
                  mfa_push_max_retries=None,
-                 assert_pinset=None):
+                 assert_pinset=None,
+                 allowed_groups=None):
         passcode_len = 6
         self.okta_url = None
         self.okta_token = okta_token
@@ -111,6 +112,7 @@ class OktaAPIAuth(object):
         self.okta_urlparse = urlparse.urlparse(okta_url)
         self.mfa_push_delay_secs = mfa_push_delay_secs
         self.mfa_push_max_retries = mfa_push_max_retries
+        self.allowed_groups = set(allowed_groups) if allowed_groups else None # Deal with empty list
         if assert_pinset is None:
             assert_pinset = okta_pinset
         url_new = (self.okta_urlparse.scheme,
@@ -130,7 +132,7 @@ class OktaAPIAuth(object):
             ca_certs=certifi.where(),
         )
 
-    def okta_req(self, path, data):
+    def okta_req(self, path, data, method='POST'):
         ssws = "SSWS {token}".format(token=self.okta_token)
         headers = {
             'user-agent': user_agent,
@@ -141,7 +143,7 @@ class OktaAPIAuth(object):
             }
         url = "{base}/api/v1{path}".format(base=self.okta_url, path=path)
         req = self.pool.urlopen(
-            'POST',
+            method,
             url,
             headers=headers,
             body=json.dumps(data)
@@ -164,6 +166,11 @@ class OktaAPIAuth(object):
             'passCode': self.passcode,
         }
         return self.okta_req(path, data)
+
+    def get_groups(self, user_id):
+        path =  "/users/{user_id}/groups".format(user_id=user_id)
+        groups = self.okta_req(path, {}, method='GET')
+        return [group['profile']['name'] for group in groups]
 
     def auth(self):
         username = self.username
@@ -236,8 +243,14 @@ class OktaAPIAuth(object):
                     log.error('Unexpected error with the Okta API: %s', e)
                     return False
                 if 'status' in res and res['status'] == 'SUCCESS':
+                    if self.allowed_groups is not None:
+                        user_id = res['_embedded']['user']['id']
+                        groups = self.get_groups(user_id)
+                        if not self.allowed_groups & set(groups):
+                            log.debug("User %s groups %s was not in one of the allowed groups %s" % (self.username, groups, self.allowed_groups))
+                            return False
                     log.info("User %s is now authenticated "
-                             "with MFA via Okta API", self.username)
+                            "with MFA via Okta API", self.username)
                     return True
             if 'errorCauses' in res:
                 msg = res['errorCauses'][0]['errorSummary']
@@ -297,6 +310,7 @@ class OktaOpenVPNValidator(object):
                                                         'MFAPushMaxRetries'),
                         'mfa_push_delay_secs': cfg.get('OktaAPI',
                                                        'MFAPushDelaySeconds'),
+                        'allowed_groups': cfg.get('OktaAPI', 'AllowedGroups').split(',')
                         }
                     always_trust_username = cfg.get(
                         'OktaAPI',
@@ -348,6 +362,7 @@ class OktaOpenVPNValidator(object):
             'username': username,
             'password': password,
             'client_ipaddr': client_ipaddr,
+            'allowed_groups': self.site_config['allowed_groups']
         }
         for item in ['mfa_push_max_retries', 'mfa_push_delay_secs']:
             if item in self.site_config:
